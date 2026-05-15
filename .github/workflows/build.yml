@@ -1,4 +1,4 @@
-name: Build Antigravity Arch Package
+name: Build Antigravity from AUR
 
 on:
   workflow_dispatch:
@@ -10,40 +10,54 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    container:
+      image: archlinux:latest
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
+      - name: Initialize pacman
         run: |
-          sudo apt update
+          pacman -Syu --noconfirm
 
-          sudo apt install -y \
-            make \
-            fakeroot \
-            zstd \
-            curl \
-            gnupg \
-            ca-certificates \
-            libarchive-tools \
-            pacman-package-manager
+          pacman -S --noconfirm \
+            base-devel \
+            git \
+            sudo
 
-      - name: Verify files
+      - name: Create build user
         run: |
-          ls -la
+          useradd -m builder
 
-          test -f PKGBUILD || (echo "PKGBUILD missing" && exit 1)
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      - name: Build package
+      - name: Install paru
         run: |
-          makepkg -sf --noconfirm
+          sudo -u builder bash -c '
+            cd /home/builder &&
+            git clone https://aur.archlinux.org/paru.git &&
+            cd paru &&
+            makepkg -si --noconfirm
+          '
 
-      - name: List built packages
+      - name: Build antigravity package
         run: |
-          ls -lh *.pkg.tar.zst
+          sudo -u builder bash -c '
+            paru -S --noconfirm --skipreview antigravity
+          '
 
-      - name: Upload package artifact
+      - name: Find built package
+        run: |
+          find /home/builder/.cache/paru/clone -name "*.pkg.tar.zst"
+
+      - name: Copy package
+        run: |
+          mkdir output
+
+          find /home/builder/.cache/paru/clone \
+            -name "*.pkg.tar.zst" \
+            -exec cp {} output/ \;
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: antigravity-arch-package
-          path: "*.pkg.tar.zst"
+          path: output/*.pkg.tar.zst
