@@ -2,8 +2,9 @@ name: Build Antigravity Arch Package
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */12 * * *"
+  push:
+    branches:
+      - main
 
 jobs:
   build:
@@ -13,85 +14,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt update
 
           sudo apt install -y \
+            make \
+            fakeroot \
+            zstd \
             curl \
             gnupg \
             ca-certificates \
-            tar \
-            zstd \
-            fakeroot \
             libarchive-tools \
             pacman-package-manager
 
-      - name: Add Antigravity repository
+      - name: Verify files
         run: |
-          sudo mkdir -p /etc/apt/keyrings
+          ls -la
 
-          curl -fsSL \
-            https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg \
-            | sudo gpg --dearmor --yes \
-              -o /etc/apt/keyrings/antigravity-repo-key.gpg
+          test -f PKGBUILD || (echo "PKGBUILD missing" && exit 1)
 
-          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] \
-          https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ \
-          antigravity-debian main" \
-          | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
-
-          sudo apt update
-
-      - name: Download Antigravity package
+      - name: Build package
         run: |
-          mkdir -p work
-          cd work
+          makepkg -sf --noconfirm
 
-          apt download antigravity
-
-      - name: Extract .deb package
+      - name: List built packages
         run: |
-          cd work
-
-          DEB_FILE=$(find . -name "*.deb" | head -n1)
-
-          echo "Using package: $DEB_FILE"
-
-          mkdir -p deb-extract
-          mkdir -p rootfs
-
-          bsdtar -xf "$DEB_FILE" -C deb-extract
-
-          tar -xf deb-extract/data.tar.* -C rootfs
-
-      - name: Generate PKGBUILD
-        run: |
-          cd work
-
-          VERSION=$(dpkg-deb -f *.deb Version)
-
-          cat > PKGBUILD <<EOF
-          pkgname=google-antigravity
-          pkgver=${VERSION//-/_}
-          pkgrel=1
-          pkgdesc="Google Antigravity repackaged for Arch Linux"
-          arch=('x86_64')
-          url="https://us-central1-apt.pkg.dev"
-          license=('custom')
-
-          package() {
-              cp -a "\$srcdir/rootfs/." "\$pkgdir/"
-          }
-          EOF
-
-      - name: Build Arch package
-        run: |
-          cd work
-          makepkg --nodeps --force --noextract
+          ls -lh *.pkg.tar.zst
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: google-antigravity-arch
-          path: work/*.pkg.tar.zst
+          name: antigravity-arch-package
+          path: "*.pkg.tar.zst"
