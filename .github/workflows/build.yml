@@ -43,7 +43,7 @@ jobs:
 
           sudo apt update
 
-      - name: Download antigravity package
+      - name: Download Antigravity package
         run: |
           mkdir -p work
           cd work
@@ -58,11 +58,10 @@ jobs:
 
           echo "Using package: $DEB_FILE"
 
-          mkdir deb-extract
+          mkdir -p deb-extract
+          mkdir -p rootfs
 
           bsdtar -xf "$DEB_FILE" -C deb-extract
-
-          mkdir rootfs
 
           tar -xf deb-extract/data.tar.* -C rootfs
 
@@ -82,14 +81,14 @@ jobs:
           license=('custom')
 
           package() {
-              cp -a rootfs/* "\$pkgdir/"
+              cp -a "\$srcdir/rootfs/." "\$pkgdir/"
           }
           EOF
 
       - name: Build Arch package
         run: |
           cd work
-          makepkg --nodeps --force
+          makepkg --nodeps --force --noextract
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
