@@ -9,72 +9,75 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    env:
-      BASE_URL: https://us-central1-apt.pkg.dev
-      DIST: antigravity-debian
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt update
+
           sudo apt install -y \
             curl \
-            jq \
-            bsdtar \
+            gnupg \
+            ca-certificates \
             tar \
             zstd \
-            fakeroot
+            fakeroot \
+            libarchive-tools
 
-      - name: Install Arch tools
+      - name: Add Google Antigravity repository
         run: |
-          sudo apt install -y pacman-package-manager
+          sudo mkdir -p /etc/apt/keyrings
 
-      - name: Fetch latest .deb
+          curl -fsSL \
+            https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg \
+            | sudo gpg --dearmor --yes \
+              -o /etc/apt/keyrings/antigravity-repo-key.gpg
+
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] \
+          https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ \
+          antigravity-debian main" \
+          | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+
+          sudo apt update
+
+      - name: Install Antigravity package
+        run: |
+          sudo apt install -y antigravity
+
+      - name: Extract installed package
         run: |
           mkdir work
-          cd work
 
-          curl -LO \
-            "$BASE_URL/dists/$DIST/main/binary-amd64/Packages"
+          dpkg -L antigravity > work/filelist.txt
 
-          PKG_PATH=$(grep "^Filename:" Packages | head -n1 | awk '{print $2}')
+          mkdir -p work/rootfs
 
-          echo "PKG_PATH=$PKG_PATH" >> $GITHUB_ENV
+          cd /
 
-          curl -LO "$BASE_URL/$PKG_PATH"
+          sudo tar \
+            --exclude=proc \
+            --exclude=sys \
+            --exclude=dev \
+            -cf - \
+            $(dpkg -L antigravity | grep '^/') \
+          | tar -xf - -C "$GITHUB_WORKSPACE/work/rootfs"
 
-      - name: Extract deb
+      - name: Create PKGBUILD
         run: |
-          cd work
+          VERSION=$(dpkg-query -W -f='${Version}' antigravity)
 
-          DEB_FILE=$(basename "$PKG_PATH")
-
-          mkdir extract
-          bsdtar -xf "$DEB_FILE" -C extract
-
-          mkdir rootfs
-          tar -xf extract/data.tar.* -C rootfs
-
-      - name: Generate PKGBUILD
-        run: |
-          cd work
-
-          VERSION=$(grep "^Version:" Packages | head -n1 | awk '{print $2}')
-
-          cat > PKGBUILD <<EOF
+          cat > work/PKGBUILD <<EOF
           pkgname=google-antigravity
           pkgver=${VERSION//-/_}
           pkgrel=1
-          pkgdesc="Google Antigravity"
+          pkgdesc="Google Antigravity repackaged for Arch Linux"
           arch=('x86_64')
           license=('custom')
-          depends=()
-          
+
           package() {
-              cp -r rootfs/* "\$pkgdir/"
+              cp -a rootfs/* "\$pkgdir/"
           }
           EOF
 
@@ -83,7 +86,7 @@ jobs:
           cd work
           makepkg --nodeps --force
 
-      - name: Upload package artifact
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: google-antigravity-arch
