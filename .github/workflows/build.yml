@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
 
@@ -24,9 +24,10 @@ jobs:
             tar \
             zstd \
             fakeroot \
-            libarchive-tools
+            libarchive-tools \
+            pacman-package-manager
 
-      - name: Add Google Antigravity repository
+      - name: Add Antigravity repository
         run: |
           sudo mkdir -p /etc/apt/keyrings
 
@@ -42,38 +43,42 @@ jobs:
 
           sudo apt update
 
-      - name: Install Antigravity package
+      - name: Download antigravity package
         run: |
-          sudo apt install -y antigravity
+          mkdir -p work
+          cd work
 
-      - name: Extract installed package
+          apt download antigravity
+
+      - name: Extract .deb package
         run: |
-          mkdir work
+          cd work
 
-          dpkg -L antigravity > work/filelist.txt
+          DEB_FILE=$(find . -name "*.deb" | head -n1)
 
-          mkdir -p work/rootfs
+          echo "Using package: $DEB_FILE"
 
-          cd /
+          mkdir deb-extract
 
-          sudo tar \
-            --exclude=proc \
-            --exclude=sys \
-            --exclude=dev \
-            -cf - \
-            $(dpkg -L antigravity | grep '^/') \
-          | tar -xf - -C "$GITHUB_WORKSPACE/work/rootfs"
+          bsdtar -xf "$DEB_FILE" -C deb-extract
 
-      - name: Create PKGBUILD
+          mkdir rootfs
+
+          tar -xf deb-extract/data.tar.* -C rootfs
+
+      - name: Generate PKGBUILD
         run: |
-          VERSION=$(dpkg-query -W -f='${Version}' antigravity)
+          cd work
 
-          cat > work/PKGBUILD <<EOF
+          VERSION=$(dpkg-deb -f *.deb Version)
+
+          cat > PKGBUILD <<EOF
           pkgname=google-antigravity
           pkgver=${VERSION//-/_}
           pkgrel=1
           pkgdesc="Google Antigravity repackaged for Arch Linux"
           arch=('x86_64')
+          url="https://us-central1-apt.pkg.dev"
           license=('custom')
 
           package() {
@@ -86,7 +91,7 @@ jobs:
           cd work
           makepkg --nodeps --force
 
-      - name: Upload package
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: google-antigravity-arch
