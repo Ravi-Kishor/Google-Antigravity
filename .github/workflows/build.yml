@@ -1,188 +1,90 @@
-name: Antigravity AUR Auto-Build & Release
+name: Build Antigravity Arch Package
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 4 * * 0'   # Every Sunday at 04:00 UTC (~7-day cadence)
-  workflow_dispatch:        # Allow manual trigger anytime
-
-permissions:
-  contents: write           # Needed to create releases & upload assets
+    - cron: "0 */12 * * *"
 
 jobs:
-  check-and-build:
-    name: Fetch, Build & Release
+  build:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
+
+    env:
+      BASE_URL: https://us-central1-apt.pkg.dev
+      DIST: antigravity-debian
 
     steps:
-      # ── 0. Bootstrap Arch toolchain ─────────────────────────────────────
-      - name: Bootstrap pacman & build tools
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed \
-            base-devel git curl jq wget binutils sudo
-
-      # Allow the container's default root to run makepkg (it won't by default)
-      - name: Create build user
-        run: |
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-
-      # ── 1. Checkout repo ────────────────────────────────────────────────
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Discover latest upstream version ─────────────────────────────
-      - name: Fetch latest Antigravity version from Google APT repo
-        id: upstream
+      - name: Install dependencies
         run: |
-          # The .deb pool URL pattern uses the version in the filename.
-          # We query the Packages index to find the current version.
-          PACKAGES_URL="https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/pool/antigravity-debian/dists/stable/main/binary-amd64/Packages"
-          RAW="$(curl -fsSL "$PACKAGES_URL" 2>/dev/null || true)"
+          sudo apt update
+          sudo apt install -y \
+            curl \
+            jq \
+            bsdtar \
+            tar \
+            zstd \
+            fakeroot
 
-          if [[ -z "$RAW" ]]; then
-            echo "⚠️  Could not reach upstream Packages index — falling back to PKGBUILD version"
-            VERSION="$(grep '^pkgver=' PKGBUILD | cut -d= -f2)"
-          else
-            VERSION="$(echo "$RAW" | grep '^Version:' | head -n1 | awk '{print $2}' | cut -d- -f1)"
-          fi
-
-          echo "upstream_version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Upstream version: $VERSION"
-
-      # ── 3. Check whether we already released this version ───────────────
-      - name: Check existing GitHub release
-        id: release_check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Arch tools
         run: |
-          TAG="v${{ steps.upstream.outputs.upstream_version }}"
-          EXISTS="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-                    --json tagName -q '.tagName' 2>/dev/null || true)"
-          if [[ "$EXISTS" == "$TAG" ]]; then
-            echo "already_released=true"  >> "$GITHUB_OUTPUT"
-            echo "✅ $TAG already released — nothing to do."
-          else
-            echo "already_released=false" >> "$GITHUB_OUTPUT"
-            echo "🆕 New version $TAG — proceeding with build."
-          fi
+          sudo apt install -y pacman-package-manager
 
-      # ── 4. Patch PKGBUILD with new version ──────────────────────────────
-      - name: Update PKGBUILD version
-        if: steps.release_check.outputs.already_released == 'false'
+      - name: Fetch latest .deb
         run: |
-          NEW_VER="${{ steps.upstream.outputs.upstream_version }}"
-          sed -i "s/^pkgver=.*/pkgver=$NEW_VER/" PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=1/"         PKGBUILD
-          echo "PKGBUILD patched to $NEW_VER"
+          mkdir work
+          cd work
 
-      # ── 5. Download upstream .deb files to compute real checksums ────────
-      - name: Download .deb assets & compute sha256
-        if: steps.release_check.outputs.already_released == 'false'
-        id: checksums
+          curl -LO \
+            "$BASE_URL/dists/$DIST/main/binary-amd64/Packages"
+
+          PKG_PATH=$(grep "^Filename:" Packages | head -n1 | awk '{print $2}')
+
+          echo "PKG_PATH=$PKG_PATH" >> $GITHUB_ENV
+
+          curl -LO "$BASE_URL/$PKG_PATH"
+
+      - name: Extract deb
         run: |
-          # Source the PKGBUILD to get URL variables
-          source PKGBUILD 2>/dev/null || true
+          cd work
 
-          VER="${{ steps.upstream.outputs.upstream_version }}"
+          DEB_FILE=$(basename "$PKG_PATH")
 
-          # We need the timestamp/md5 fields from the Packages index
-          PACKAGES_URL="https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/pool/antigravity-debian/dists/stable/main/binary-amd64/Packages"
-          RAW_AMD64="$(curl -fsSL "$PACKAGES_URL" 2>/dev/null || true)"
+          mkdir extract
+          bsdtar -xf "$DEB_FILE" -C extract
 
-          PACKAGES_ARM_URL="https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/pool/antigravity-debian/dists/stable/main/binary-arm64/Packages"
-          RAW_ARM64="$(curl -fsSL "$PACKAGES_ARM_URL" 2>/dev/null || true)"
+          mkdir rootfs
+          tar -xf extract/data.tar.* -C rootfs
 
-          # Extract Filename lines (contain timestamp+md5 embedded in path)
-          AMD64_FILENAME="$(echo "$RAW_AMD64" | grep '^Filename:' | head -n1 | awk '{print $2}')"
-          ARM64_FILENAME="$(echo "$RAW_ARM64" | grep '^Filename:' | head -n1 | awk '{print $2}')"
-
-          # Derive full URLs
-          BASE="https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/pool/antigravity-debian"
-          AMD64_URL="$BASE/$AMD64_FILENAME"
-          ARM64_URL="$BASE/$ARM64_FILENAME"
-
-          echo "Downloading amd64 .deb…"
-          wget -q "$AMD64_URL" -O antigravity-amd64.deb
-
-          echo "Downloading arm64 .deb…"
-          wget -q "$ARM64_URL" -O antigravity-arm64.deb
-
-          AMD64_SHA="$(sha256sum antigravity-amd64.deb | awk '{print $1}')"
-          ARM64_SHA="$(sha256sum antigravity-arm64.deb | awk '{print $1}')"
-
-          # Extract timestamps and md5s from filenames for PKGBUILD variables
-          AMD64_TS="$(basename "$AMD64_FILENAME" | grep -oP '_\K[0-9]+(?=_amd64)'   || true)"
-          AMD64_MD="$(basename "$AMD64_FILENAME" | grep -oP '_amd64_\K[a-f0-9]+'    || true)"
-          ARM64_TS="$(basename "$ARM64_FILENAME" | grep -oP '_\K[0-9]+(?=_arm64)'   || true)"
-          ARM64_MD="$(basename "$ARM64_FILENAME" | grep -oP '_arm64_\K[a-f0-9]+'    || true)"
-
-          # Patch PKGBUILD
-          sed -i "s/^_x86_64_timestamp=.*/_x86_64_timestamp=$AMD64_TS/"   PKGBUILD
-          sed -i "s/^_aarch64_timestamp=.*/_aarch64_timestamp=$ARM64_TS/" PKGBUILD
-          sed -i "s/^_x86_64_md5sum=.*/_x86_64_md5sum=$AMD64_MD/"         PKGBUILD
-          sed -i "s/^_aarch64_md5sum=.*/_aarch64_md5sum=$ARM64_MD/"       PKGBUILD
-          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$AMD64_SHA')/" PKGBUILD
-          sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$ARM64_SHA')/" PKGBUILD
-
-          echo "amd64_sha=$AMD64_SHA" >> "$GITHUB_OUTPUT"
-          echo "arm64_sha=$ARM64_SHA" >> "$GITHUB_OUTPUT"
-
-      # ── 6. Build the package (x86_64) ───────────────────────────────────
-      - name: Build package
-        if: steps.release_check.outputs.already_released == 'false'
+      - name: Generate PKGBUILD
         run: |
-          cp -r . /home/builder/pkg
-          chown -R builder:builder /home/builder/pkg
-          cd /home/builder/pkg
-          sudo -u builder makepkg -s --noconfirm --noprogressbar 2>&1
+          cd work
 
-      # ── 7. Copy built artifacts back ─────────────────────────────────────
-      - name: Collect built packages
-        if: steps.release_check.outputs.already_released == 'false'
+          VERSION=$(grep "^Version:" Packages | head -n1 | awk '{print $2}')
+
+          cat > PKGBUILD <<EOF
+          pkgname=google-antigravity
+          pkgver=${VERSION//-/_}
+          pkgrel=1
+          pkgdesc="Google Antigravity"
+          arch=('x86_64')
+          license=('custom')
+          depends=()
+          
+          package() {
+              cp -r rootfs/* "\$pkgdir/"
+          }
+          EOF
+
+      - name: Build Arch package
         run: |
-          mkdir -p /github/workspace/dist
-          find /home/builder/pkg -name "*.pkg.tar.zst" \
-               -exec cp {} /github/workspace/dist/ \;
-          ls -lh /github/workspace/dist/
+          cd work
+          makepkg --nodeps --force
 
-      # ── 8. Create GitHub Release & upload assets ─────────────────────────
-      - name: Create GitHub Release
-        if: steps.release_check.outputs.already_released == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="v${{ steps.upstream.outputs.upstream_version }}"
-          VER="${{ steps.upstream.outputs.upstream_version }}"
-
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Antigravity $VER" \
-            --notes "**Automated repackage of Google Antigravity $VER for Arch Linux**
-
-          Built from upstream Google APT repository on $(date -u '+%Y-%m-%d %H:%M UTC').
-
-          ### Install
-          \`\`\`bash
-          bash <(curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install-antigravity.sh)
-          \`\`\`
-          Or download the \`.pkg.tar.zst\` below and run:
-          \`\`\`bash
-          sudo pacman -U antigravity-*.pkg.tar.zst
-          \`\`\`" \
-            /github/workspace/dist/*.pkg.tar.zst
-
-          echo "✅ Release $TAG created."
-
-      # ── 9. Commit updated PKGBUILD back to repo ──────────────────────────
-      - name: Commit PKGBUILD changes
-        if: steps.release_check.outputs.already_released == 'false'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD
-          git diff --cached --quiet && echo "No PKGBUILD changes to commit" || \
-            git commit -m "chore: bump to v${{ steps.upstream.outputs.upstream_version }} [skip ci]"
-          git push
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-antigravity-arch
+          path: work/*.pkg.tar.zst
